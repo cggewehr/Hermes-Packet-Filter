@@ -266,6 +266,7 @@ always_ff @(posedge clk) begin
 				if (size == 1) begin
 
                     txEnable <= 1'b0;
+					timeoutEnable <= 1'b0;
 				
 					// Skip to waiting for SIZE flit if there already is a valid ADDR flit in A
 					// if (AIsValid && validAddressChecksum)
