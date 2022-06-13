@@ -21,11 +21,18 @@ module PacketFilter #(
 
 // 2 FIFO registers (A & B)
 logic[31:0] A;
-logic[31:0] B;
-logic AIsValid;
-logic BIsValid;
+logic AValid;
+logic AReady;
 logic AIsHeader;
+logic AEnable;  // Controlled by FSM
+logic AClear;  // Controlled by FSM
+
+logic[31:0] B;
+logic BValid;
+logic BReady;
 logic BIsHeader;
+logic BEnable;  // Controlled by FSM
+logic BClear;  // Controlled by FSM
 
 // Timeout counter (counts how many consecutive cycles an attempt to write a flit into A was not performed)
 logic timeoutEnable;
@@ -33,77 +40,106 @@ logic timeoutFlag;
 logic[$clog2(TimeoutMax)-1:0] timeoutCounter;
 
 // Flit counter (counts how many payload flits are yet to be transmitted in a packet whose header has been validate via checksums)
-logic[15:0] size;
+logic[23:0] size;
 
 logic paddingEnable;
 
-logic[15:0] addressChecksum;
-logic[15:0] sizeChecksum;
+logic[7:0] addressChecksum;
+logic[7:0] sizeChecksum;
 logic validAddressChecksum;
 logic validSizeChecksum;
 
 typedef enum logic [1:0] {Saddr, Ssize, Spayload, Spad} state_t;
 state_t state;
 
-logic invalidateBuffer;
+// logic invalidateBuffer;
 logic txEnable;
 
-assign tx = (BIsValid && (txEnable || validSizeChecksum) || paddingEnable) ? 1'b1 : 1'b0;
-assign data_out = paddingEnable ? 32'd0 : B;
-assign credit_o = (!AIsValid || (AIsValid && !BIsValid && !paddingEnable) || (AIsValid && BIsValid && credit_i)) ? 1'b1 : 1'b0;
+// Combinational control to A enable
+assign AReady = ((AValid && BReady) || !AValid) && AEnable ? 1'b1 : 1'b0;
 
-// Write to A & B FIFO registers. A conditionally <= data_in, data_out <= B.
+// A write control
 always_ff @(posedge clk) begin
 
 	if (reset) begin
-		AIsValid <= 1'b0;
-		BIsValid <= 1'b0;
+		AValid <= 1'b0;
 		AIsHeader <= 1'b0;
-		BIsHeader <= 1'b0;
-	end
-	
-	// Can write to A if: A is empty OR B is empty (B <= A) OR B is being consumed (credit_i == 1)
-	if (!timeoutFlag && !paddingEnable && ((rx && !AIsValid) || (rx && AIsValid && !BIsValid) || (rx && AIsValid && BIsValid && credit_i))) begin
-	
-		A <= data_in;
-		AIsValid <= 1'b1;
+	end else begin 
 
-		// Determine if the flit being written into A is a header flit (either ADDR or SIZE)
-		if ((size == 2 && AIsValid && BIsValid && credit_i) || (size == 1 && !AIsValid && BIsValid && BIsHeader && credit_i) || (size == 0 && !(AIsHeader && BIsHeader)))
-			AIsHeader <= 1'b1;
-		else
+		if (rx && AReady) begin
+
+			A <= data_in;
+
+			if (!AClear) begin
+				// AIsHeader <= (state == Saddr || state == Ssize || ((state == Spayload || state == Spad) 
+				AIsHeader <= (state == Saddr || (state == Ssize && !validSizeChecksum) || ((state == Spayload || state == Spad) 
+																                       && ( (size == 2 && AValid && BValid) 
+																                       || (size == 1 && (AValid ^ BValid) ) ) ) ) ? 1'b1 : 1'b0;
+			end
+
+		end
+
+		if (rx && AReady)
+			AValid <= rx;
+		// else if (AClear) begin
+		// else if (AClear || (!rx && AReady)) begin
+		else if (AClear || (!(rx && AReady) && AValid && BReady)) begin
+			AValid <= 1'b0;
 			AIsHeader <= 1'b0;
-		
-	end
-	
-	// A is not valid if no new value has been written this cycle and B is empty (meaning this cycle, the current value of A will be written into B and no new value was provided)
-    // Also invalidate A if timeout or invalid SIZE checksum
-	if ((!rx && !BIsValid) || (!rx && AIsValid && BIsValid && credit_i && (txEnable || validSizeChecksum)) || timeoutFlag || (AIsValid && BIsValid && !validSizeChecksum && BIsHeader)) begin
-		AIsValid <= 1'b0;
-        AIsHeader <= 1'b0;
-    end
+		end
 
-	// Can write to B if: A is valid and (B is not valid or B is valid, but was consumed in the current cycle)
-    // Waits for padding to be done before writting to B, since checksum computations are performed on A value, and the result of these computations must be observed by the FSM within the Saddr and Ssize states
-	if (!paddingEnable && !timeoutFlag && (AIsValid && !BIsValid) || (AIsValid && BIsValid && credit_i)) begin
-		B <= A;
-		BIsValid <= 1'b1;
-		BIsHeader <= AIsHeader;
 	end
-	
-	// B is not valid if no new value has been written this cycle and not waiting OR timeout on ADDR flit
-	if ((!AIsValid && credit_i && txEnable) || timeoutFlag || invalidateBuffer) begin
-		BIsValid <= 1'b0;
-		BIsHeader <= 1'b0;
-    end
-	
+
 end
 
+// Combinational control to B write enable
+assign BReady = ((BValid && credit_i) || !BValid) && BEnable ? 1'b1 : 1'b0;
+
+// B write control
+always_ff @(posedge clk) begin
+
+	if (reset) begin
+		BValid <= 1'b0;
+		BIsHeader <= 1'b0;
+	end else begin 
+
+		if (AValid && BReady) begin
+
+			B <= A;
+
+			if (!BClear) 
+				BIsHeader <= AIsHeader;
+
+		end
+
+		if (AValid && BReady)
+			BValid <= AValid;
+		// else if (BClear || (!AValid && BReady)) begin
+		// Consumiu e nao escreveu
+		else if (BClear || (!(AValid && BReady) && BValid && (credit_i && txEnable))) begin
+			BValid <= 1'b0;
+			BIsHeader <= 1'b0;
+		end
+		
+	end
+
+end
+
+assign tx = (BValid && (txEnable || validSizeChecksum) || paddingEnable) ? 1'b1 : 1'b0;
+assign data_out = paddingEnable ? 32'd0 : B;
+assign credit_o = ((rx && AReady) || !rx) ? 1'b1 : 1'b0;
+
 // Combinationally determine valid checksums from flit written into A FIFO register
-assign addressChecksum = A[15:0] ^ {XMax, YMax};
-assign sizeChecksum = A[15:0] ^ B[31:16];
-assign validAddressChecksum = ((A[31:16] == addressChecksum) && AIsValid) ? 1'b1 : 1'b0;
-assign validSizeChecksum = ((A[31:16] == sizeChecksum) && AIsHeader && AIsValid && BIsValid && (state == Ssize)) ? 1'b1 : 1'b0;
+localparam checksumIV = {XMax, YMax};
+
+for (genvar i = 0; i < 8; i++)
+	assign addressChecksum[i] = A[2*i] ^ A[2*i + 1] ^ checksumIV[2*i] ^ checksumIV[2*i + 1];
+
+for (genvar i = 0; i < 8; i++)
+	assign sizeChecksum[i] = A[3*i] ^ A[3*i + 1] ^ A[3*i + 2] ^ B[i+16];
+
+assign validAddressChecksum = ((A[23:16] == addressChecksum) && AValid) ? 1'b1 : 1'b0;
+assign validSizeChecksum = ((A[31:24] == sizeChecksum) && AIsHeader && AValid && BValid && (state == Ssize)) ? 1'b1 : 1'b0;
 
 // Timeout Counter
 always_ff @(posedge clk) begin
@@ -138,27 +174,38 @@ always_ff @(posedge clk) begin
 
 end
 
-// Control FSM, synchronous reset
+// Control FSM
 always_ff @(posedge clk) begin
 
     if (reset) begin 
 	
-        invalidateBuffer <= 1'b0;
+        // invalidateBuffer <= 1'b0;
         txEnable <= 1'b0;
 		
         timeoutEnable <= 1'b0;
         paddingEnable <= 1'b0;
 
-        size <= 16'd0;
+        // size <= 16'd0;
+        size <= 24'd0;
+
+		AEnable <= 1'b1;
+		AClear <= 1'b0;
+
+		BEnable <= 1'b1;
+		AClear <= 1'b0;
 		
         state <= Saddr;
 		
     end else begin 
+
+		// Buffer enables active by default
+		AEnable <= 1'b1;
+		AClear <= 1'b0;
+		BEnable <= 1'b1;
+		BClear <= 1'b0;
         
 		// Wait for a new valid ADDR flit
         if (state == Saddr) begin 
-		
-			invalidateBuffer <= 1'b0;
 	
             // Remains waiting for an ADDR flit until a valid ADDR flit checksum is seen. Non-valid ADDR flits are discarted and not propagated to Router local port.
             if (validAddressChecksum) begin
@@ -173,21 +220,24 @@ always_ff @(posedge clk) begin
 			if (timeoutFlag) begin
 
 				timeoutEnable <= 1'b0;
+				BClear <= 1'b1;
 				state <= Saddr;
 				
 			end else begin
         
                 // Valid SIZE flit, wait for first payload flit
-				if (AIsValid && validSizeChecksum) begin
+				if (AValid && validSizeChecksum) begin
 
 					txEnable <= 1'b1;
-					size <= A[15:0];
+					size <= A[23:0];
 					state <= Spayload;
 
                 // SIZE checksum fail, invalidade ADDR flit on B and SIZE flit on A and wait for new valid ADDR flit
-				end else if (AIsValid && !validSizeChecksum) begin
+				end else if (AValid && !validSizeChecksum) begin
 
-					invalidateBuffer <= 1'b1;
+					// invalidateBuffer <= 1'b1;
+					AClear <= 1'b1;
+					BClear <= 1'b1;
 					state <= Saddr;
 
 				end
@@ -202,10 +252,13 @@ always_ff @(posedge clk) begin
 			
 				timeoutEnable <= 1'b0;
 				paddingEnable <= 1'b1;
+				BEnable <= 1'b0;
+
 				state <= Spad;
 				
             // Payload flit in B register was consumed by Router local port
-			end else if (BIsValid && !BIsHeader && credit_i) begin
+			// end else if (BIsValid && !BIsHeader && credit_i) begin
+			end else if (BValid && !BIsHeader && credit_i) begin
 			
 				size <= size - 1;
 				
@@ -215,13 +268,15 @@ always_ff @(posedge clk) begin
                     txEnable <= 1'b0;
 				
 					// Skip to waiting for SIZE flit if there already is a valid ADDR flit in A
-					if (AIsValid && validAddressChecksum)
+					// if (AIsValid && validAddressChecksum)
+					if (AValid && validAddressChecksum)
 						state <= Ssize;
 
 				    else begin
 
                         if (!validAddressChecksum)
-                            invalidateBuffer <= 1'b1;
+                            // invalidateBuffer <= 1'b1;
+                            AClear <= 1'b1;
 
 					    state <= Saddr;
 
@@ -233,7 +288,10 @@ always_ff @(posedge clk) begin
 	
 		// Pad remainder of a packet's payload with null flits after timeout
 		end else if (state == Spad) begin
+
+			BEnable <= 1'b0;
 		    
+			// TX is always '1' when inserting padding
             if (credit_i) begin
 
 			    size <= size - 1;
@@ -243,15 +301,18 @@ always_ff @(posedge clk) begin
 			    
                     txEnable <= 1'b0;
 				    paddingEnable <= 1'b0;
-		    
+					BEnable <= 1'b1;
+					
 					// Skip to waiting for SIZE flit if there already is a valid ADDR flit in A
-				    if (AIsValid && validAddressChecksum)
+				    // if (AIsValid && validAddressChecksum)
+				    if (AValid && validAddressChecksum)
 					    state <= Ssize;
 
 				    else begin
 
                         if (!validAddressChecksum)
-                            invalidateBuffer <= 1'b1;
+                            // invalidateBuffer <= 1'b1;
+							AClear <= 1'b1;
 
 					    state <= Saddr;
 

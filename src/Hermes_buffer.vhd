@@ -58,7 +58,7 @@ signal EA: fifo_out;
 signal buf: buff := (others=>(others=>'0'));
 signal read_pointer,write_pointer: pointer;
 --signal counter_flit: regflit;
-signal counter_flit: regmetadeflit;
+signal counter_flit: std_logic_vector(23 downto 0);
 
 signal data_available: std_logic;
 
@@ -154,7 +154,7 @@ begin
 							-- If the second flit, memorize the packet size
 							if counter_flit = x"0"   then   
 								--counter_flit <=  buf(CONV_INTEGER(read_pointer));
-								counter_flit <=  buf(CONV_INTEGER(read_pointer))(15 downto 0);
+								counter_flit <=  buf(CONV_INTEGER(read_pointer))(23 downto 0);
 							elsif counter_flit /= x"1" then 
 								counter_flit <=  counter_flit - 1;
 							end if;

@@ -83,16 +83,27 @@ class HermesPacket;
 	endfunction
 	
 	function post_randomize();
+
+		bit[15:0] checksumIV;
+		checksumIV = {this.XMax, this.YMax};
 	
-		// Set checksums on addr and size
-		this.addr[31:16] = this.addr[15:0] ^ {XMax, YMax};
-		this.size[31:16] = this.addr[31:16] ^ this.size[15:0];
+		// Set checksums on ADDR and SIZE
+		// this.addr[31:16] = this.addr[15:0] ^ {XMax, YMax};
+		for (int i = 0; i < 8; i++)
+			this.addr[i+16] = this.addr[2*i] ^ this.addr[2*i + 1] ^ checksumIV[2*i] ^ checksumIV[2*i + 1];
 		
+		// this.size[31:16] = this.addr[31:16] ^ this.size[15:0];
+		for (int i = 0; i < 8; i++)
+			this.size[i+24] = this.size[3*i] ^ this.size[3*i + 1] ^ this.size[3*i + 2] ^ this.addr[i+16];
+		
+		// Set intentionally bad checksums
 		if (this.packetError == BadAddressChecksum)
-			this.addr[31:16] = !this.addr[31:16];
+			// this.addr[31:16] = !this.addr[31:16];
+			this.addr[23:16] = !this.addr[23:16];
 			
 		if (this.packetError == BadSizeChecksum)
-			this.size[31:16] = !this.size[31:16];
+			// this.size[31:16] = !this.size[31:16];
+			this.size[31:24] = !this.size[31:24];
 		
 	endfunction
 
